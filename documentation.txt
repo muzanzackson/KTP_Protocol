@@ -1,0 +1,187 @@
+/*
+Name    : Konduri Jeevan Varma
+Roll No : 22CS10038
+*/
+
+KTP SOCKET DOCUMENTATION
+
+--------------------------------------------------
+
+Overview  
+This project implements a custom socket protocol (KTP) layered on top of UDP sockets. It uses shared memory, semaphores, and mutexes to manage socket state and ensure proper synchronization between processes and threads. The implementation supports socket creation, binding, sending, receiving, and closing, while using sliding window mechanisms for reliable communication.[1][2][3]
+
+--------------------------------------------------
+Macros and Constants  
+-  **SOCK_KTP**: Identifier for the KTP socket type.  
+-  **T**: Timeout period (in seconds) for transmission retries.  
+-  **MAX_SOCKETS**: The maximum number of concurrent KTP sockets (25).  
+-  **DROP_PROBABILITY**: Likelihood (e.g., 0.01) of simulating a packet drop.  
+-  **SEND_BUFFER_SIZE** and **RECV_BUFFER_SIZE**: Sizes of the sender and receiver buffers, respectively.  
+-  **SENDER_WINDOW_SIZE** and **RECEIVER_WINDOW_SIZE**: Sizes of the sliding windows used in transmission.  
+-  **MAX_SEQ_NUM**: The maximum sequence number used in messages (wraps at 256).  
+-  **MESSAGE_SIZE**: The size of each message (in bytes).  
+-  **IP_SIZE**: Allocated space for the destination IP (15 characters plus null terminator).  
+-  **ERROR / SUCCESS**: Standard return code definitions.  
+-  Additional keys (KTP_TABLE, SHARED_RESOURCE, SEM1, SEM2, MUTEX, MUTEX_SWND, MUTEX_SENDBUF, MUTEX_RECVBUF) are used for creating and accessing shared resources and synchronization objects
+
+--------------------------------------------------
+Data Structures
+
+-  **int8u**  
+  – Represents an unsigned 8-bit integer with modulo arithmetic enforced (value is wrapped modulo 256).  
+  – Field: `int value`.  
+  – Functions (see below) initialize and perform arithmetic on this type
+
+-  **header**  
+  – Contains the sequence number for a message.  
+  – Field: `int seq_number`.  
+  – This is embedded within the message structure to track ordering
+
+-  **message**  
+  – Encapsulates a data packet.  
+  – Fields:  
+   -  `header header`: Holds the sequence number.  
+   -  `char data[MESSAGE_SIZE]`: The message payload
+
+-  **send_window**  
+  – Manages the sliding window for sent messages.  
+  – Fields:  
+   -  `left_idx` and `right_idx`: Indicate the bounds of the current window.  
+   -  `fresh_msg`: Index for the next outgoing message.  
+   -  `last_seq_no`: Last sequence number assigned.  
+   -  `last_ack_seqno`: Last acknowledged sequence number.  
+   -  `last_sent`: Index of the last message sent.  
+   -  `last_sent_time[SEND_BUFFER_SIZE]`: Timestamps for tracking transmission attempts.  
+   -  `last_ack_rwnd_size`: Last acknowledged receiver window size.
+
+-  **receive_window**  
+  – Handles the sliding window for received messages.  
+  – Fields:  
+   -  `full`: Boolean flag indicating whether the receive buffer is full.  
+   -  `last_inorder_received`: Last in-order message received.  
+   -  `last_consumed`: Sequence number of the last user-processed message.  
+   -  `window`: Array holding expected sequence numbers for incoming data.
+
+-  **ktpSocket**  
+  – The main structure representing a KTP socket.  
+  – Fields:  
+   -  `available`: Flag indicating if the socket slot is free (true) or in use (false).  
+   -  `pid`: Process ID that created the socket.  
+   -  `udp_sockid`: Underlying UDP socket descriptor mapping.  
+   -  `dest_ip` and `dest_port`: Destination address details.  
+   -  `send_buffer[SEND_BUFFER_SIZE]`: Buffer storing outgoing messages.  
+   -  `receive_buffer[RECV_BUFFER_SIZE]`: Buffer for incoming messages.  
+   -  `swnd`: The sending window structure.  
+   -  `rwnd`: The receiving window structure.
+
+-  **SOCK_INFO**  
+  – Used to exchange meta-information about socket operations between processes/threads.  
+  – Fields:  
+   -  `status`: Indicates the current operation (socket creation, bind, close).  
+   -  `ktp_id`: Identifier of the KTP socket in operation.  
+   -  `src_addr`: Source address for binding operations.  
+   -  `return_value`: Return value of the most recent operation.  
+   -  `error_no`: Error number, if any, from the last call.
+
+--------------------------------------------------
+Function Descriptions
+
+**int8u Functions**  
+-  `int8u init_int8u(int value)`  
+  – Initializes an int8u value ensuring the number is within 0–255 using modulo arithmetic.
+
+-  `int8u add_int8u(int8u a, int8u b)`  
+  – Adds two int8u values and returns the result (wrapped modulo 256).
+
+-  `int8u sub_int8u(int8u a, int8u b)`  
+  – Subtracts one int8u value from another, ensuring a non-negative result via modulo arithmetic.
+
+**Socket API Functions**  
+-  `int k_socket(int domain, int type, int protocol)`  
+  – Creates a new KTP socket.  
+  – Validates the socket type (must be SOCK_KTP) and allocates a new entry in the shared KTP table.  
+  – Initializes synchronization primitives and sets up shared resources via semaphores.
+
+-  `int k_bind(int socket_id, char *src_ip, unsigned short int src_port, char *dest_ip, unsigned short int dest_port)`  
+  – Associates the KTP socket with the provided source and destination addresses.  
+  – Sets up the internal address structure and updates the shared SOCK_INFO accordingly.
+
+-  `int k_sendto(int sockfd, const void *buf, size_t len, int flags, const struct sockaddr *dest_addr, socklen_t addrlen)`  
+  – Queues a message into the send buffer for the specified KTP socket.  
+  – Validates that the destination provided matches the bound destination address.  
+  – Assigns a sequence number and updates the sending window.
+
+-  `int k_recvfrom(int sockfd, void *buf, size_t len, int flags, struct sockaddr *src_addr, socklen_t *addrlen)`  
+  – Receives a message from the KTP socket’s receive buffer.  
+  – Searches for an in-order message based on sliding window rules and updates the window once processed.
+
+-  `int k_close(int socket_id)`  
+  – Closes the specified KTP socket by resetting its state in the shared KTP table.  
+  – Clears the send and receive buffers, releases the UDP socket, and frees up the associated resources.
+
+**Shared Memory and Synchronization Functions**  
+-  `ktpSocket *get_shared_KTP_Table()`  
+  – Retrieves a pointer to the shared memory segment that holds the KTP socket table.  
+  – Creates/attaches the shared memory segment using a unique key.
+
+-  `SOCK_INFO *get_SOCK_INFO()`  
+  – Retrieves a pointer to a shared SOCK_INFO structure that is used to exchange metadata between operations.
+
+-  `void get_sem1(int *sem1)` and `void get_sem2(int *sem2)`  
+  – Obtain identifiers for the first and second semaphores used for synchronizing operations between threads/processes
+
+-  `void get_mutex(int *mutex)`, `void get_mutex_swnd(int *mutex_swnd)`, `void get_mutex_sendbuf(int *mutex_sendbuf)`, `void get_mutex_recvbuf(int *mutex_recvbuf)`  
+  – Retrieve mutex semaphore identifiers to protect the shared KTP table and the individual send/receive buffers and windows.
+
+**Thread Functions and Utilities**  
+-  `void *thread_R_func(void *arg)`  
+  – Implements the receiver thread logic.  
+  – Waits for incoming data on the UDP socket, processes incoming messages, updates the receive window, and sends ACKs as necessary.
+
+-  `void *thread_S_func(void *arg)`  
+  – Implements the sender thread logic.  
+  – Periodically scans the send buffer for messages that need to be retransmitted due to timeout and triggers their (re)transmission.
+
+-  `void *thread_G_func(void *arg)`  
+  – Acts as the garbage collector thread.  
+  – Periodically checks the status of active sockets, prints KTP table information, and clears sockets whose owner processes have exited.
+
+-  `int dropMessage(float p)`  
+  – A utility function that simulates packet loss by dropping messages with a probability P
+  – Returns a non-zero value if the generated random value is below the specified probability.
+
+--------------------------------------------------
+Synchronization and Concurrency  
+-  The macros `down(s)` and `up(s)` encapsulate semaphore wait and signal operations using `semop`, ensuring safe access to shared resources.  
+-  Multiple mutexes protect critical sections: one for the overall socket table and additional ones for the sending window, send buffer, and receive buffer.  
+-  These mechanisms ensure that threads (sender, receiver, and garbage collector) operate without data races.
+
+--------------------------------------------------
+Application Flow and Error Handling  
+-  During initialization (in initksocket.c), shared memory segments and semaphores are created and set to appropriate initial values.  
+-  Threads are spawned for handling sending (thread_S_func), receiving (thread_R_func), and periodic housekeeping (thread_G_func).  
+-  The main loop waits on semaphore signals (via sem1 and sem2) and checks the status field in SOCK_INFO to process socket, bind, and close requests.  
+-  In case of errors, the SOCK_INFO structure is updated with an error number (setting errno accordingly) so that the calling process can detect and handle failures.  
+-  A SIGINT handler cleans up shared memory and semaphore resources upon termination.
+
+--------------------------------------------------
+End of Documentation
+
+
+                        TABLE FOR VARABLE P VALUES (file size 77KB)
+
+as each message is 512 B so we have 77KB/512B = 153 messages 
+
+| Probability | Total Messages | Expected Transmissions | Avg Transmissions per Message |
+|-------------|----------------|------------------------|-------------------------------|
+| 0.05        | 153            | 167                    | 1.09                          |
+| 0.10        | 153            | 173                    | 1.13                          |
+| 0.15        | 153            | 174                    | 1.14                          |
+| 0.20        | 153            | 205                    | 1.34                          |
+| 0.25        | 153            | 219                    | 1.43                          |
+| 0.30        | 153            | 208                    | 1.36                          |
+| 0.35        | 153            | 220                    | 1.44                          |
+| 0.40        | 153            | 237                    | 1.55                          |
+| 0.45        | 153            | 246                    | 1.61                          |
+| 0.50        | 153            | 289                    | 1.89                          |
+
